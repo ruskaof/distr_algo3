@@ -1,12 +1,11 @@
 import time
 
 import numpy as np
-from datasketch import HNSW
 
 from common import (
     ALL_CONFIG_NAMES, HNSW_CONFIGS, IVFPQ_CONFIGS, LSH_CONFIGS,
-    RandomProjectionLSH, build_hnsw, build_index_set, build_ivfpq, build_lsh,
-    load_data, measure_size_mb, rank_candidates, recall_at_k,
+    build_hnsw, build_index_set, build_ivfpq, build_lsh,
+    load_data, measure_size_mb, recall_at_k,
 )
 
 INDEX_SIZE = 50_000
@@ -16,7 +15,7 @@ CONFIGS    = None
 
 
 def evaluate_hnsw(
-    index: HNSW,
+    index,
     query_vectors: np.ndarray,
     query_local_pos: np.ndarray,
     gt_local: list,
@@ -28,14 +27,13 @@ def evaluate_hnsw(
     for i, qv in enumerate(query_vectors):
         results = index.query(qv, k=k + 1, ef=ef_query)
         neighbour_ids = [key for key, _ in results if key != query_local_pos[i]][:k]
-        recalls.append(recall_at_k(neighbour_ids, gt_local[i], k))
+        recalls.append(recall_at_k(neighbour_ids, gt_local[i], k)) # pyright: ignore[reportArgumentType]
     elapsed = time.perf_counter() - t0
     return float(np.mean(recalls)), len(query_vectors) / elapsed
 
 
 def evaluate_lsh(
-    index: RandomProjectionLSH,
-    index_vectors: np.ndarray,
+    index,
     query_vectors: np.ndarray,
     query_local_pos: np.ndarray,
     gt_local: list,
@@ -44,8 +42,8 @@ def evaluate_lsh(
     recalls = []
     t0 = time.perf_counter()
     for i, qv in enumerate(query_vectors):
-        candidates = [c for c in index.query(qv) if c != query_local_pos[i]]
-        neighbours = rank_candidates(candidates, qv, index_vectors, k)
+        _, I = index.search(qv.reshape(1, -1), k + 1)
+        neighbours = [int(x) for x in I[0] if x >= 0 and x != query_local_pos[i]][:k]
         recalls.append(recall_at_k(neighbours, gt_local[i], k))
     elapsed = time.perf_counter() - t0
     return float(np.mean(recalls)), len(query_vectors) / elapsed
@@ -120,13 +118,13 @@ def main():
                         "recall": recall, "query_qps": qps, "size_mb": size_mb, "k": TOP_K})
 
     for cfg in lsh_cfgs:
-        print(f"{cfg['name']}  (n_planes={cfg['n_planes']}, n_tables={cfg['n_tables']})")
+        print(f"{cfg['name']}  (nbits={cfg['nbits']})")
         t0 = time.perf_counter()
-        idx = build_lsh(index_vectors, cfg, seed=SEED)
+        idx = build_lsh(index_vectors, cfg)
         build_s = time.perf_counter() - t0
         print(f"  built in {build_s:.2f}s", end="  ")
 
-        recall, qps = evaluate_lsh(idx, index_vectors, query_vectors, query_local_pos, gt_local, TOP_K)
+        recall, qps = evaluate_lsh(idx, query_vectors, query_local_pos, gt_local, TOP_K)
         size_mb = measure_size_mb(idx)
         print(f"recall={recall:.3f}  qps={qps:.0f}  size={size_mb:.1f}MB")
         results.append({"name": cfg["name"], "type": "LSH", "build_s": build_s,

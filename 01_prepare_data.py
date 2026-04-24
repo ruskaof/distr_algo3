@@ -17,8 +17,8 @@ def load_model(corpus_size: int | None):
     model = api.load("word2vec-ruscorpora-300")
     print(f"  vocab: {len(model)} words")
 
-    all_words   = np.array(model.index_to_key, dtype=object)
-    all_vectors = model.vectors.astype(np.float32)
+    all_words   = np.array(model.index_to_key, dtype=object) # pyright: ignore[reportAttributeAccessIssue]
+    all_vectors = model.vectors.astype(np.float32) # pyright: ignore[reportAttributeAccessIssue]
 
     noun_mask = np.array([str(w).endswith("_NOUN") for w in all_words])
     words   = all_words[noun_mask]

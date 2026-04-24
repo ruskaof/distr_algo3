@@ -7,43 +7,6 @@ import numpy as np
 from datasketch import HNSW
 
 
-class RandomProjectionLSH:
-    def __init__(self, n_planes: int, dim: int, n_tables: int, seed: int):
-        rng = np.random.default_rng(seed)
-        self.n_planes = n_planes
-        self.n_tables = n_tables
-        self.planes: list[np.ndarray] = []
-        for _ in range(n_tables):
-            table_planes = rng.standard_normal((n_planes, dim)).astype(np.float32)
-            for p in range(n_planes):
-                table_planes[p] /= np.linalg.norm(table_planes[p])
-            self.planes.append(table_planes)
-        self._tables: list[dict[int, list[int]]] = []
-
-    def _hash(self, vec: np.ndarray, table_idx: int) -> int:
-        norm = np.linalg.norm(vec)
-        normed = vec / norm if norm > 1e-10 else vec
-        code = 0
-        for p in range(self.n_planes):
-            if np.dot(self.planes[table_idx][p], normed) >= 0:
-                code |= (1 << p)
-        return code
-
-    def build(self, vectors: np.ndarray) -> None:
-        self._tables = [{} for _ in range(self.n_tables)]
-        for idx, vec in enumerate(vectors):
-            for t in range(self.n_tables):
-                code = self._hash(vec, t)
-                self._tables[t].setdefault(code, []).append(idx)
-
-    def query(self, vector: np.ndarray) -> list[int]:
-        candidates: set[int] = set()
-        for t in range(self.n_tables):
-            code = self._hash(vector, t)
-            candidates.update(self._tables[t].get(code, []))
-        return list(candidates)
-
-
 HNSW_CONFIGS: list[dict[str, Any]] = [
     {"name": "hnsw_1", "m": 4,  "ef_construction": 10, "ef_query": 10},
     {"name": "hnsw_2", "m": 6,  "ef_construction": 20, "ef_query": 20},
@@ -52,10 +15,10 @@ HNSW_CONFIGS: list[dict[str, Any]] = [
 ]
 
 LSH_CONFIGS: list[dict[str, Any]] = [
-    {"name": "lsh_1", "n_planes": 16, "n_tables": 4 },
-    {"name": "lsh_2", "n_planes": 12, "n_tables": 8 },
-    {"name": "lsh_3", "n_planes": 10, "n_tables": 16},
-    {"name": "lsh_4", "n_planes": 8,  "n_tables": 32},
+    {"name": "lsh_1", "nbits": 64 },
+    {"name": "lsh_2", "nbits": 128},
+    {"name": "lsh_3", "nbits": 256},
+    {"name": "lsh_4", "nbits": 512},
 ]
 
 IVFPQ_CONFIGS: list[dict[str, Any]] = [
@@ -90,14 +53,9 @@ def build_hnsw(vectors: np.ndarray, cfg: dict[str, Any]) -> HNSW:
     return idx
 
 
-def build_lsh(vectors: np.ndarray, cfg: dict[str, Any], seed: int) -> RandomProjectionLSH:
-    idx = RandomProjectionLSH(
-        n_planes=cfg["n_planes"],
-        n_tables=cfg["n_tables"],
-        dim=vectors.shape[1],
-        seed=seed,
-    )
-    idx.build(vectors)
+def build_lsh(vectors: np.ndarray, cfg: dict[str, Any]) -> faiss.IndexLSH:
+    idx = faiss.IndexLSH(vectors.shape[1], cfg["nbits"])
+    idx.add(vectors)
     return idx
 
 
@@ -111,8 +69,8 @@ def build_ivfpq(vectors: np.ndarray, cfg: dict[str, Any]) -> faiss.IndexIVFPQ:
     dim = vectors.shape[1]
     quantizer = faiss.IndexFlatL2(dim)
     idx = faiss.IndexIVFPQ(quantizer, dim, cfg["nlist"], cfg["m_pq"], cfg["nbits"])
-    idx.train(vectors)
-    idx.add(vectors)
+    idx.train(vectors) # pyright: ignore[reportCallIssue]
+    idx.add(vectors) # pyright: ignore[reportCallIssue]
     idx.nprobe = cfg["nprobe"]
     return idx
 
@@ -122,18 +80,6 @@ def recall_at_k(approx: list[int], exact: np.ndarray, k: int) -> float:
         return 0.0
     return len(set(approx[:k]) & set(exact[:k].tolist())) / k
 
-
-def rank_candidates(candidates: list[int], query_vec: np.ndarray,
-                    index_vectors: np.ndarray, k: int) -> list[int]:
-    if not candidates:
-        return []
-    scored = []
-    for idx in candidates:
-        diff = index_vectors[idx] - query_vec
-        sq_dist = float(np.dot(diff, diff))
-        scored.append((sq_dist, idx))
-    scored.sort()
-    return [idx for _, idx in scored[:k]]
 
 
 def load_data() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:

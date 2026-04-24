@@ -3,7 +3,7 @@ import numpy as np
 from common import (
     HNSW_CONFIGS, IVFPQ_CONFIGS, LSH_CONFIGS,
     build_hnsw, build_index_set, build_ivfpq, build_lsh,
-    load_data, rank_candidates, sq_euclidean,
+    load_data, sq_euclidean,
 )
 
 INDEX_SIZE = 50_000
@@ -62,7 +62,7 @@ def main():
     hnsw = build_hnsw(index_vectors, HNSW_CFG)
 
     print(f"building LSH ...")
-    lsh = build_lsh(index_vectors, LSH_CFG, seed=SEED)
+    lsh = build_lsh(index_vectors, LSH_CFG)
 
     print(f"building IVFPQ ...")
     ivfpq = build_ivfpq(index_vectors, IVFPQ_CFG)
@@ -78,8 +78,8 @@ def main():
     hnsw_raw        = hnsw.query(qv, k=TOP_K + 1, ef=HNSW_CFG["ef_query"])
     hnsw_neighbours = [key for key, _ in hnsw_raw if key != lp][:TOP_K]
 
-    lsh_candidates  = [c for c in lsh.query(qv) if c != lp]
-    lsh_neighbours  = rank_candidates(lsh_candidates, qv, index_vectors, TOP_K)
+    _, I = lsh.search(qv.reshape(1, -1), TOP_K + 1)
+    lsh_neighbours = [int(x) for x in I[0] if x >= 0 and x != lp][:TOP_K]
 
     _, I = ivfpq.search(qv.reshape(1, -1), TOP_K + 1)
     ivfpq_neighbours = [int(x) for x in I[0] if x >= 0 and x != lp][:TOP_K]
