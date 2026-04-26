@@ -1,38 +1,10 @@
 import os
-import pickle
+import tempfile
 from typing import Any
 
 import faiss
+import hnswlib
 import numpy as np
-from datasketch import HNSW
-
-
-HNSW_CONFIGS: list[dict[str, Any]] = [
-    {"name": "hnsw_1", "m": 4,  "ef_construction": 10, "ef_query": 10},
-    {"name": "hnsw_2", "m": 6,  "ef_construction": 20, "ef_query": 20},
-    {"name": "hnsw_3", "m": 8,  "ef_construction": 40, "ef_query": 40},
-    {"name": "hnsw_4", "m": 12, "ef_construction": 80, "ef_query": 80},
-]
-
-LSH_CONFIGS: list[dict[str, Any]] = [
-    {"name": "lsh_1", "nbits": 64 },
-    {"name": "lsh_2", "nbits": 128},
-    {"name": "lsh_3", "nbits": 256},
-    {"name": "lsh_4", "nbits": 512},
-]
-
-IVFPQ_CONFIGS: list[dict[str, Any]] = [
-    {"name": "ivfpq_1", "nlist": 64,  "m_pq": 15, "nbits": 8, "nprobe": 1 },
-    {"name": "ivfpq_2", "nlist": 128, "m_pq": 15, "nbits": 8, "nprobe": 4 },
-    {"name": "ivfpq_3", "nlist": 256, "m_pq": 15, "nbits": 8, "nprobe": 16},
-    {"name": "ivfpq_4", "nlist": 512, "m_pq": 15, "nbits": 8, "nprobe": 64},
-]
-
-ALL_CONFIG_NAMES = (
-    [c["name"] for c in HNSW_CONFIGS] +
-    [c["name"] for c in LSH_CONFIGS] +
-    [c["name"] for c in IVFPQ_CONFIGS]
-)
 
 
 def sq_euclidean(a: np.ndarray, b: np.ndarray) -> float:
@@ -40,16 +12,14 @@ def sq_euclidean(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(d, d))
 
 
-def build_hnsw(vectors: np.ndarray, cfg: dict[str, Any]) -> HNSW:
-    idx = HNSW(
-        distance_func=sq_euclidean,
-        m=cfg["m"],
-        ef_construction=cfg["ef_construction"],
-    )
-    for i, vec in enumerate(vectors):
-        idx.insert(i, vec, ef=cfg["ef_construction"])
-        if (i + 1) % 5000 == 0:
-            print(f"  {i + 1}/{len(vectors)} inserted", flush=True)
+def build_hnsw(vectors: np.ndarray, cfg: dict[str, Any]) -> hnswlib.Index:
+    dim = vectors.shape[1]
+    idx = hnswlib.Index(space="l2", dim=dim)
+    idx.init_index(max_elements=len(vectors),
+                   ef_construction=cfg["ef_construction"],
+                   M=cfg["m"])
+    idx.add_items(vectors)
+    idx.set_ef(cfg["ef_query"])
     return idx
 
 
@@ -59,27 +29,34 @@ def build_lsh(vectors: np.ndarray, cfg: dict[str, Any]) -> faiss.IndexLSH:
     return idx
 
 
-def measure_size_mb(index: Any) -> float:
-    if isinstance(index, faiss.Index):
-        return faiss.serialize_index(index).nbytes / 1024 / 1024
-    return len(pickle.dumps(index, protocol=5)) / 1024 / 1024
-
-
 def build_ivfpq(vectors: np.ndarray, cfg: dict[str, Any]) -> faiss.IndexIVFPQ:
     dim = vectors.shape[1]
     quantizer = faiss.IndexFlatL2(dim)
     idx = faiss.IndexIVFPQ(quantizer, dim, cfg["nlist"], cfg["m_pq"], cfg["nbits"])
-    idx.train(vectors) # pyright: ignore[reportCallIssue]
-    idx.add(vectors) # pyright: ignore[reportCallIssue]
+    idx.train(vectors)
+    idx.add(vectors)
     idx.nprobe = cfg["nprobe"]
     return idx
+
+
+def measure_size_mb(index: Any) -> float:
+    if isinstance(index, faiss.Index):
+        return faiss.serialize_index(index).nbytes / 1024 / 1024
+    if isinstance(index, hnswlib.Index):
+        with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f:
+            path = f.name
+        try:
+            index.save_index(path)
+            return os.path.getsize(path) / 1024 / 1024
+        finally:
+            os.unlink(path)
+    return 0.0
 
 
 def recall_at_k(approx: list[int], exact: np.ndarray, k: int) -> float:
     if not approx:
         return 0.0
     return len(set(approx[:k]) & set(exact[:k].tolist())) / k
-
 
 
 def load_data() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
