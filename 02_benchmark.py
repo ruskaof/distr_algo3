@@ -180,7 +180,7 @@ def plot_comparison(hnsw_res, lsh_res, ivfpq_res, path):
         (ivfpq_res, "IVF+PQ (full grid)",     "forestgreen", "^"),
     ]
 
-    fig, axes = plt.subplots(1, 2, figsize=(15, 6))
+    fig, axes = plt.subplots(1, 3, figsize=(21, 6))
 
     # left: recall vs QPS
     ax = axes[0]
@@ -208,6 +208,20 @@ def plot_comparison(hnsw_res, lsh_res, ivfpq_res, path):
     ax.legend(fontsize=11)
     ax.grid(True, alpha=0.3)
     ax.set_title("Recall vs Index Size", fontsize=13)
+
+    # right: recall vs build time
+    ax = axes[2]
+    for res, label, color, marker in series:
+        recalls = [r["recall"] for r in res]
+        build_s = [r["build_s"] for r in res]
+        ax.scatter(recalls, build_s, label=label, color=color,
+                   marker=marker, s=45, alpha=0.8)
+    ax.set_xlabel("Recall", fontsize=12)
+    ax.set_ylabel("Build time (s)", fontsize=12)
+    ax.set_yscale("log")
+    ax.legend(fontsize=11)
+    ax.grid(True, alpha=0.3)
+    ax.set_title("Recall vs Build Time", fontsize=13)
 
     fig.suptitle("Algorithm comparison", fontsize=14)
     plt.tight_layout()
