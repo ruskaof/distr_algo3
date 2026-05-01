@@ -1,30 +1,122 @@
+import numpy as np
+import matplotlib.pyplot as plt
 import os
+import tempfile
 import time
+from typing import Any
 
+import faiss
+import hnswlib
 import matplotlib
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import numpy as np
-
-from common import (
-    build_hnsw, build_index_set, build_ivfpq, build_lsh,
-    load_data, measure_size_mb, recall_at_k,
-)
 
 INDEX_SIZE = 500_000   # effectively uses the full corpus (~185k nouns)
-TOP_K      = 100
-SEED       = 42
+TOP_K = 100
+SEED = 42
 GRAPHS_DIR = "graphs"
 
-HNSW_M_VALUES  = [2, 4, 6, 8, 10, 12]
+HNSW_M_VALUES = [2, 4, 6, 8, 10, 12]
 HNSW_EF_VALUES = [10, 20, 30, 50, 80]
 
-LSH_NBITS_VALUES = [64, 128, 256, 512, 1024]
+LSH_NBITS_VALUES = [64, 128, 256, 512, 1024, 2048]
 
-IVFPQ_NLIST_VALUES  = [64, 128, 256, 512, 1024]
-IVFPQ_NPROBE_VALUES = [1, 2, 4, 8, 16, 32, 64]
-IVFPQ_M_PQ_VALUES   = [15, 30]
-IVFPQ_NBITS_VALUES  = [8, 10]
+IVFPQ_NLIST_VALUES = [64, 256, 1024]
+IVFPQ_NPROBE_VALUES = [1, 4, 16, 64]
+IVFPQ_M_PQ_VALUES = [15, 30, 60]
+IVFPQ_NBITS_VALUES = [8, 10, 12]
+
+
+def build_hnsw(vectors: np.ndarray, cfg: dict[str, Any]) -> hnswlib.Index:
+    dim = vectors.shape[1]
+    idx = hnswlib.Index(space="l2", dim=dim)
+    idx.init_index(max_elements=len(vectors),
+                   ef_construction=cfg["ef_construction"], M=cfg["m"])
+    idx.add_items(vectors)
+    idx.set_ef(cfg["ef_query"])
+    return idx
+
+
+def build_lsh(vectors: np.ndarray, cfg: dict[str, Any]) -> faiss.IndexLSH:
+    idx = faiss.IndexLSH(vectors.shape[1], cfg["nbits"])
+    idx.add(vectors)
+    return idx
+
+
+def build_ivfpq(vectors: np.ndarray, cfg: dict[str, Any]) -> faiss.IndexIVFPQ:
+    dim = vectors.shape[1]
+    quantizer = faiss.IndexFlatL2(dim)
+    idx = faiss.IndexIVFPQ(
+        quantizer, dim, cfg["nlist"], cfg["m_pq"], cfg["nbits"])
+    idx.train(vectors)
+    idx.add(vectors)
+    idx.nprobe = cfg["nprobe"]
+    return idx
+
+
+def measure_size_mb(index: Any) -> float:
+    if isinstance(index, faiss.Index):
+        return faiss.serialize_index(index).nbytes / 1024 / 1024
+    if isinstance(index, hnswlib.Index):
+        with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f:
+            path = f.name
+        try:
+            index.save_index(path)
+            return os.path.getsize(path) / 1024 / 1024
+        finally:
+            os.unlink(path)
+    return 0.0
+
+
+def recall_at_k(approx: list[int], exact: np.ndarray, k: int) -> float:
+    if not approx:
+        return 0.0
+    return len(set(approx[:k]) & set(exact[:k].tolist())) / k
+
+
+def load_data() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    for fname in ("data/corpus_vectors.npy", "data/corpus_words.npy", "data/query_indices.npy", "data/ground_truth.npy"):
+        if not os.path.exists(fname):
+            raise FileNotFoundError(
+                f"{fname} not found - run 01_prepare_data.py first")
+    corpus_vectors = np.load("data/corpus_vectors.npy")
+    corpus_words = np.load("data/corpus_words.npy", allow_pickle=True)
+    query_indices = np.load("data/query_indices.npy")
+    ground_truth = np.load("data/ground_truth.npy")
+    return corpus_vectors, corpus_words, query_indices, ground_truth
+
+
+def build_index_set(
+    corpus_vectors: np.ndarray,
+    query_indices: np.ndarray,
+    index_size: int,
+    top_k: int,
+    ground_truth: np.ndarray,
+    rng: np.random.Generator,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[np.ndarray]]:
+    n_corpus = len(corpus_vectors)
+    index_size = min(index_size, n_corpus)
+
+    query_set = set(query_indices.tolist())
+    other_ids = np.array([i for i in range(n_corpus) if i not in query_set])
+    n_extra = min(index_size - len(query_indices), len(other_ids))
+    extra_ids = rng.choice(other_ids, size=n_extra, replace=False)
+    index_corpus_ids = np.sort(np.concatenate([query_indices, extra_ids]))
+
+    index_vectors = corpus_vectors[index_corpus_ids]
+
+    corpus_to_local = np.full(n_corpus, -1, dtype=np.int64)
+    corpus_to_local[index_corpus_ids] = np.arange(
+        len(index_corpus_ids), dtype=np.int64)
+
+    query_local_pos = corpus_to_local[query_indices]
+    query_vectors = index_vectors[query_local_pos]
+
+    gt_local = [
+        corpus_to_local[ground_truth[i]
+                        [corpus_to_local[ground_truth[i]] >= 0]][:top_k]
+        for i in range(len(query_indices))
+    ]
+    return index_vectors, index_corpus_ids, corpus_to_local, query_local_pos, query_vectors, gt_local
 
 
 def evaluate_hnsw(index, query_vectors, query_local_pos, gt_local, k):
@@ -45,13 +137,15 @@ def evaluate_hnsw(index, query_vectors, query_local_pos, gt_local, k):
             fallback_hits += 1
             neighbours = []
         else:
-            neighbours = [x for x in labels[0].tolist() if x != int(query_local_pos[i])][:k]
+            neighbours = [x for x in labels[0].tolist() if x !=
+                          int(query_local_pos[i])][:k]
             if len(neighbours) < k:
                 fallback_hits += 1
         recalls.append(recall_at_k(neighbours, gt_local[i], k))
     elapsed = time.perf_counter() - t0
     if fallback_hits:
-        print(f"    note: hnsw fallback used for {fallback_hits} / {len(query_vectors)} queries")
+        print(
+            f"    note: hnsw fallback used for {fallback_hits} / {len(query_vectors)} queries")
     return float(np.mean(recalls)), len(query_vectors) / elapsed
 
 
@@ -60,7 +154,8 @@ def evaluate_faiss(index, query_vectors, query_local_pos, gt_local, k):
     t0 = time.perf_counter()
     for i, qv in enumerate(query_vectors):
         _, I = index.search(qv.reshape(1, -1), k + 1)
-        neighbours = [int(x) for x in I[0] if x >= 0 and x != int(query_local_pos[i])][:k]
+        neighbours = [int(x) for x in I[0] if x >= 0 and x !=
+                      int(query_local_pos[i])][:k]
         recalls.append(recall_at_k(neighbours, gt_local[i], k))
     elapsed = time.perf_counter() - t0
     return float(np.mean(recalls)), len(query_vectors) / elapsed
@@ -99,8 +194,9 @@ def plot_comparison(hnsw_res, lsh_res, ivfpq_res, path):
     ax = axes[0]
     for res, label, color, marker in series:
         recalls = [r["recall"] for r in res]
-        qps     = [r["query_qps"] for r in res]
-        ax.scatter(recalls, qps, label=label, color=color, marker=marker, s=45, alpha=0.8)
+        qps = [r["query_qps"] for r in res]
+        ax.scatter(recalls, qps, label=label, color=color,
+                   marker=marker, s=45, alpha=0.8)
     ax.set_xlabel("Recall@100", fontsize=12)
     ax.set_ylabel("Query QPS", fontsize=12)
     ax.set_yscale("log")
@@ -112,8 +208,9 @@ def plot_comparison(hnsw_res, lsh_res, ivfpq_res, path):
     ax = axes[1]
     for res, label, color, marker in series:
         recalls = [r["recall"] for r in res]
-        sizes   = [r["size_mb"] for r in res]
-        ax.scatter(recalls, sizes, label=label, color=color, marker=marker, s=45, alpha=0.8)
+        sizes = [r["size_mb"] for r in res]
+        ax.scatter(recalls, sizes, label=label, color=color,
+                   marker=marker, s=45, alpha=0.8)
     ax.set_xlabel("Recall@100", fontsize=12)
     ax.set_ylabel("Index size (MB)", fontsize=12)
     ax.legend(fontsize=11)
@@ -143,14 +240,16 @@ def main():
 
     corpus_vectors, _, query_indices, ground_truth = load_data()
     n_corpus, dim = corpus_vectors.shape
-    print(f"corpus: {n_corpus} × {dim}  |  queries: {len(query_indices)}  |  k={TOP_K}")
+    print(
+        f"corpus: {n_corpus} × {dim}  |  queries: {len(query_indices)}  |  k={TOP_K}")
 
     index_vectors, index_corpus_ids, _, query_local_pos, query_vectors, gt_local = build_index_set(
         corpus_vectors, query_indices, INDEX_SIZE, TOP_K, ground_truth, rng
     )
     n_index = len(index_corpus_ids)
     n_extra = n_index - len(query_indices)
-    print(f"index: {n_index} vectors  ({len(query_indices)} query + {n_extra} random)\n")
+    print(
+        f"index: {n_index} vectors  ({len(query_indices)} query + {n_extra} random)\n")
 
     # ── HNSW: full (m, ef) grid ──────────────────────────────────────────────────
     print("=== HNSW: full grid (m x ef_construction, ef_query auto >= k+1) ===")
@@ -164,14 +263,16 @@ def main():
             t0 = time.perf_counter()
             idx = build_hnsw(index_vectors, cfg)
             build_s = time.perf_counter() - t0
-            recall, qps = evaluate_hnsw(idx, query_vectors, query_local_pos, gt_local, TOP_K)
+            recall, qps = evaluate_hnsw(
+                idx, query_vectors, query_local_pos, gt_local, TOP_K)
             size_mb = measure_size_mb(idx)
             print(
                 f"  m={m:<3} ef_c={ef:<4} ef_q={ef_query:<4}  built={build_s:.1f}s  "
                 f"recall={recall:.3f}  qps={qps:.0f}  size={size_mb:.1f}MB"
             )
             hnsw_grid_results.append(
-                {"m": m, "ef": ef, "build_s": build_s, "recall": recall, "query_qps": qps, "size_mb": size_mb}
+                {"m": m, "ef": ef, "build_s": build_s, "recall": recall,
+                    "query_qps": qps, "size_mb": size_mb}
             )
     # ── LSH: nbits sweep ─────────────────────────────────────────────────────────
     print("=== LSH: nbits sweep ===")
@@ -181,11 +282,13 @@ def main():
         t0 = time.perf_counter()
         idx = build_lsh(index_vectors, cfg)
         build_s = time.perf_counter() - t0
-        recall, qps = evaluate_faiss(idx, query_vectors, query_local_pos, gt_local, TOP_K)
+        recall, qps = evaluate_faiss(
+            idx, query_vectors, query_local_pos, gt_local, TOP_K)
         size_mb = measure_size_mb(idx)
-        print(f"  nbits={nbits:<6}  built={build_s:.2f}s  recall={recall:.3f}  qps={qps:.0f}  size={size_mb:.1f}MB")
+        print(
+            f"  nbits={nbits:<6}  built={build_s:.2f}s  recall={recall:.3f}  qps={qps:.0f}  size={size_mb:.1f}MB")
         lsh_nbits_results.append({"nbits": nbits, "build_s": build_s, "recall": recall,
-                                   "query_qps": qps, "size_mb": size_mb})
+                                  "query_qps": qps, "size_mb": size_mb})
     print_table(lsh_nbits_results, "nbits", "nbits")
     plot_sweep(LSH_NBITS_VALUES, lsh_nbits_results, "nbits",
                "LSH: nbits sweep", f"{GRAPHS_DIR}/lsh_nbits_sweep.png")
@@ -197,16 +300,20 @@ def main():
         for nbits in IVFPQ_NBITS_VALUES:
             print(f"  -- m_pq={m_pq}, nbits={nbits}")
             for nlist in IVFPQ_NLIST_VALUES:
-                base_cfg = {"nlist": nlist, "m_pq": m_pq, "nbits": nbits, "nprobe": 1}
+                base_cfg = {"nlist": nlist, "m_pq": m_pq,
+                            "nbits": nbits, "nprobe": 1}
                 t0 = time.perf_counter()
                 ivfpq_base = build_ivfpq(index_vectors, base_cfg)
                 base_build_s = time.perf_counter() - t0
                 base_size_mb = measure_size_mb(ivfpq_base)
-                print(f"    nlist={nlist:<5} base built={base_build_s:.2f}s  size={base_size_mb:.1f}MB")
+                print(
+                    f"    nlist={nlist:<5} base built={base_build_s:.2f}s  size={base_size_mb:.1f}MB")
                 for nprobe in IVFPQ_NPROBE_VALUES:
                     ivfpq_base.nprobe = nprobe
-                    recall, qps = evaluate_faiss(ivfpq_base, query_vectors, query_local_pos, gt_local, TOP_K)
-                    print(f"      nprobe={nprobe:<4} recall={recall:.3f} qps={qps:.0f}")
+                    recall, qps = evaluate_faiss(
+                        ivfpq_base, query_vectors, query_local_pos, gt_local, TOP_K)
+                    print(
+                        f"      nprobe={nprobe:<4} recall={recall:.3f} qps={qps:.0f}")
                     ivfpq_grid_results.append(
                         {
                             "m_pq": m_pq,

@@ -6,7 +6,6 @@ import numpy as np
 NUM_QUERIES = 10_000
 TOP_K       = 100
 CORPUS_SIZE = "all"
-SEED        = 42
 BATCH_SIZE  = 500
 
 
@@ -79,7 +78,7 @@ def exact_knn_euclidean(corpus: np.ndarray, query_indices: np.ndarray,
 
 def main():
     corpus_size = None if CORPUS_SIZE == "all" else int(CORPUS_SIZE)
-    rng = np.random.default_rng(SEED)
+    rng = np.random.default_rng(1)
 
     os.makedirs("data", exist_ok=True)
 
