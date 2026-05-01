@@ -12,7 +12,6 @@ matplotlib.use("Agg")
 
 INDEX_SIZE = 500_000   # effectively uses the full corpus (~185k nouns)
 TOP_K = 100
-SEED = 42
 GRAPHS_DIR = "graphs"
 
 HNSW_M_VALUES = [2, 4, 6, 8, 10, 12]
@@ -122,7 +121,6 @@ def build_index_set(
 def evaluate_hnsw(index, query_vectors, query_local_pos, gt_local, k):
     recalls = []
     t0 = time.perf_counter()
-    fallback_hits = 0
     for i, qv in enumerate(query_vectors):
         # Some sparse HNSW configs (low m / ef) can fail for high k.
         # Retry with smaller request sizes so the full grid run does not crash.
@@ -134,18 +132,12 @@ def evaluate_hnsw(index, query_vectors, query_local_pos, gt_local, k):
             except RuntimeError:
                 continue
         if labels is None:
-            fallback_hits += 1
             neighbours = []
         else:
             neighbours = [x for x in labels[0].tolist() if x !=
                           int(query_local_pos[i])][:k]
-            if len(neighbours) < k:
-                fallback_hits += 1
         recalls.append(recall_at_k(neighbours, gt_local[i], k))
     elapsed = time.perf_counter() - t0
-    if fallback_hits:
-        print(
-            f"    note: hnsw fallback used for {fallback_hits} / {len(query_vectors)} queries")
     return float(np.mean(recalls)), len(query_vectors) / elapsed
 
 
@@ -165,7 +157,7 @@ def plot_sweep(x_values, results, x_label, title, path):
     fig, axes = plt.subplots(2, 2, figsize=(10, 7))
     fig.suptitle(title, fontsize=13)
     metrics = [
-        ("recall",    "Recall@100"),
+        ("recall",    "Recall"),
         ("query_qps", "Query QPS"),
         ("build_s",   "Build time (s)"),
         ("size_mb",   "Index size (MB)"),
@@ -197,7 +189,7 @@ def plot_comparison(hnsw_res, lsh_res, ivfpq_res, path):
         qps = [r["query_qps"] for r in res]
         ax.scatter(recalls, qps, label=label, color=color,
                    marker=marker, s=45, alpha=0.8)
-    ax.set_xlabel("Recall@100", fontsize=12)
+    ax.set_xlabel("Recall", fontsize=12)
     ax.set_ylabel("Query QPS", fontsize=12)
     ax.set_yscale("log")
     ax.legend(fontsize=11)
@@ -211,7 +203,7 @@ def plot_comparison(hnsw_res, lsh_res, ivfpq_res, path):
         sizes = [r["size_mb"] for r in res]
         ax.scatter(recalls, sizes, label=label, color=color,
                    marker=marker, s=45, alpha=0.8)
-    ax.set_xlabel("Recall@100", fontsize=12)
+    ax.set_xlabel("Recall", fontsize=12)
     ax.set_ylabel("Index size (MB)", fontsize=12)
     ax.legend(fontsize=11)
     ax.grid(True, alpha=0.3)
@@ -225,7 +217,7 @@ def plot_comparison(hnsw_res, lsh_res, ivfpq_res, path):
 
 
 def print_table(rows, param_key, param_label):
-    header = f"  {param_label:<10} {'Build (s)':>10} {'Recall@100':>11} {'Query QPS':>11} {'Size (MB)':>10}"
+    header = f"  {param_label:<10} {'Build (s)':>10} {'Recall':>11} {'Query QPS':>11} {'Size (MB)':>10}"
     print(header)
     print("  " + "-" * (len(header) - 2))
     for r in rows:
@@ -236,7 +228,7 @@ def print_table(rows, param_key, param_label):
 
 def main():
     os.makedirs(GRAPHS_DIR, exist_ok=True)
-    rng = np.random.default_rng(SEED)
+    rng = np.random.default_rng(1)
 
     corpus_vectors, _, query_indices, ground_truth = load_data()
     n_corpus, dim = corpus_vectors.shape
@@ -251,7 +243,6 @@ def main():
     print(
         f"index: {n_index} vectors  ({len(query_indices)} query + {n_extra} random)\n")
 
-    # ── HNSW: full (m, ef) grid ──────────────────────────────────────────────────
     print("=== HNSW: full grid (m x ef_construction, ef_query auto >= k+1) ===")
     hnsw_grid_results = []
     for m in HNSW_M_VALUES:
@@ -274,7 +265,7 @@ def main():
                 {"m": m, "ef": ef, "build_s": build_s, "recall": recall,
                     "query_qps": qps, "size_mb": size_mb}
             )
-    # ── LSH: nbits sweep ─────────────────────────────────────────────────────────
+
     print("=== LSH: nbits sweep ===")
     lsh_nbits_results = []
     for nbits in LSH_NBITS_VALUES:
@@ -293,7 +284,6 @@ def main():
     plot_sweep(LSH_NBITS_VALUES, lsh_nbits_results, "nbits",
                "LSH: nbits sweep", f"{GRAPHS_DIR}/lsh_nbits_sweep.png")
 
-    # ── IVF+PQ: full grid ─────────────────────────────────────────────────────────
     print("=== IVF+PQ: full grid (m_pq x nbits x nlist x nprobe) ===")
     ivfpq_grid_results = []
     for m_pq in IVFPQ_M_PQ_VALUES:
@@ -326,7 +316,7 @@ def main():
                             "size_mb": base_size_mb,
                         }
                     )
-    # ── comparison ───────────────────────────────────────────────────────────────
+
     print("=== comparison plot ===")
     plot_comparison(hnsw_grid_results, lsh_nbits_results, ivfpq_grid_results,
                     f"{GRAPHS_DIR}/comparison.png")
